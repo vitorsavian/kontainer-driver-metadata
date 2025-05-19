@@ -201,11 +201,20 @@ func validateEncryptedKeyRotation(release map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
+
+	// versions that need to be skipped because of some problems with the validate
+	var versionsToSkip = map[string]bool{
+		"v1.30.12+rke2r1": true,
+		"v1.31.8+rke2r1":  true,
+		"v1.32.4+rke2r1":  true,
+		"v1.33.0+rke2r1":  true,
+	}
+
 	// this is the first version that hasn't reached its end of life that requires
 	// the encrypted-key-rotation key to exist when this validation is being written
 	const firstVersionToCheckEncryptedKeyRotation = "v1.25.11"
 	compareVersions := semver.Compare(firstVersionToCheckEncryptedKeyRotation, version)
-	if compareVersions != 0 && compareVersions != -1 {
+	if compareVersions > 0 || versionsToSkip[version] {
 		return nil
 	}
 	logrus.Info("validating encrypted key rotation key on version: " + version)
