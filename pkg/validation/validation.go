@@ -26,6 +26,16 @@ const (
 var (
 	releaseDataURL    = "https://releases.rancher.com/kontainer-driver-metadata/%s/data.json"
 	releaseRegSyncURL = "https://raw.githubusercontent.com/rancher/kontainer-driver-metadata/%s/regsync.yaml"
+	versionsToSkip    = map[string]bool{
+		"v1.30.12+rke2r1": true,
+		"v1.31.8+rke2r1":  true,
+		"v1.32.4+rke2r1":  true,
+		"v1.33.0+rke2r1":  true,
+		"v1.30.12+k3s1":   true,
+		"v1.31.8+k3s1":    true,
+		"v1.32.4+k3s1":    true,
+		"v1.33.0+k3s1":    true,
+	}
 )
 
 // imageTags holds images and their tags as nested maps to make the comparison easy
@@ -200,14 +210,6 @@ func validateEncryptedKeyRotation(release map[string]interface{}) error {
 	version, _, err := unstructured.NestedString(release, "version")
 	if err != nil {
 		return err
-	}
-
-	// versions that need to be skipped because of some problems with the validate
-	var versionsToSkip = map[string]bool{
-		"v1.30.12+rke2r1": true,
-		"v1.31.8+rke2r1":  true,
-		"v1.32.4+rke2r1":  true,
-		"v1.33.0+rke2r1":  true,
 	}
 
 	// this is the first version that hasn't reached its end of life that requires
