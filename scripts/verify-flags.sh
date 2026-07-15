@@ -118,21 +118,21 @@ emit_flag_table() {
   } >> "$OUT"
 }
 
-# emit_added_table <title> <channels-set>   (added flags read from stdin)
-# Marks each added flag with whether it is already declared in channels.
-emit_added_table() {
-  local title="$1" chanset="$2"
+# emit_marked_table <title> <set> <col-header>   (flags read from stdin)
+# Renders a table marking each flag ✅/❌ according to membership in <set>.
+emit_marked_table() {
+  local title="$1" set="$2" col="$3"
   local -a flags=()
   mapfile -t flags
   {
     echo "**${title}:** ${#flags[@]}"
     echo ""
     if [[ ${#flags[@]} -gt 0 ]]; then
-      echo "| Flag | Já no channels? |"
+      echo "| Flag | ${col} |"
       echo "|------|:---:|"
       local f mark
       for f in "${flags[@]}"; do
-        if grep -qxF "$f" <<<"$chanset"; then mark="✅ sim"; else mark="❌ não"; fi
+        if grep -qxF "$f" <<<"$set"; then mark="✅ sim"; else mark="❌ não"; fi
         echo "| \`$f\` | $mark |"
       done
       echo ""
@@ -181,14 +181,16 @@ process_version() {
     return
   fi
 
-  local bin_srv bin_agt ch_srv ch_agt ch_all bin_all
+  # Modelo assimétrico:
+  #  - server LÊ o agent também: server --help é comparado com serverArgs ∪ agentArgs
+  #    (flag de agent também vale no server).
+  #  - agent lê SÓ ele: agent --help é comparado apenas com agentArgs.
+  local bin_srv bin_agt ch_srv ch_agt ch_all
   bin_srv="$(extract_help_flags "$bin" server)"
   bin_agt="$(extract_help_flags "$bin" agent)"
   ch_srv="$(channel_args "$HEAD_JSON" "$distro" "$version" serverArgs)"
   ch_agt="$(channel_args "$HEAD_JSON" "$distro" "$version" agentArgs)"
-  # server aceita flags de agent (agent embutido) -> universo do server é a união
   ch_all="$(printf '%s\n%s\n' "$ch_srv" "$ch_agt" | sort -u | sed '/^$/d')"
-  bin_all="$(printf '%s\n%s\n' "$bin_srv" "$bin_agt" | sort -u | sed '/^$/d')"
 
   # ---- Novidades: delta vs patch anterior da mesma minor ----
   echo "### 🆕 Adicionadas pelo upstream nesta versão" >> "$OUT"
@@ -207,21 +209,21 @@ process_version() {
       echo "_Comparando com \`$prev\`._" >> "$OUT"
       echo "" >> "$OUT"
       comm -13 <(extract_help_flags "$prev_bin" server) <(echo "$bin_srv") \
-        | emit_added_table "Novas flags de server" "$ch_all"
+        | emit_marked_table "Novas flags de server" "$ch_all" "Já no channels?"
       comm -13 <(extract_help_flags "$prev_bin" agent) <(echo "$bin_agt") \
-        | emit_added_table "Novas flags de agent" "$ch_agt"
+        | emit_marked_table "Novas flags de agent" "$ch_agt" "Já no agentArgs?"
     fi
   fi
 
-  # ---- Faltando no channels (lista completa) ----
-  echo "### ❌ Faltando no channels (lista completa)" >> "$OUT"
+  # ---- Faltando no channels ----
+  echo "### ❌ Faltando no channels" >> "$OUT"
   echo "" >> "$OUT"
+  # server: tudo do server --help ausente em serverArgs ∪ agentArgs
   comm -23 <(echo "$bin_srv") <(echo "$ch_all") \
-    | emit_flag_table "Faltando no channels (server)"
+    | emit_flag_table "Faltando no server (server --help vs serverArgs + agentArgs)"
+  # agent: tudo do agent --help ausente em agentArgs
   comm -23 <(echo "$bin_agt") <(echo "$ch_agt") \
-    | emit_flag_table "Faltando no channels (agent)"
-  comm -23 <(echo "$ch_all") <(echo "$bin_all") \
-    | emit_flag_table "Só no channels (não existe no binário)"
+    | emit_flag_table "Faltando no agent (agent --help vs agentArgs)"
 }
 
 # new_versions <distro> -> versions present in head but not in base
