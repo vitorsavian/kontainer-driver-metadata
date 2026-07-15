@@ -4,8 +4,8 @@
 # data.json), this script reports two things per version:
 #
 #   1. "Adicionadas pelo upstream" — flags that this version introduced compared
-#      to the previous patch in the same minor line (binário novo − binário
-#      anterior), each marked whether it is already declared in channels. This
+#      to the previous patch in the same minor line (new binary minus previous
+#      binary), each marked whether it is already declared in channels. This
 #      answers "what did this version add".
 #   2. "Faltando no channels" — every flag exposed by the release binary that is
 #      NOT declared in serverArgs/agentArgs. This answers "what is missing".
@@ -89,7 +89,7 @@ previous_version() {
   patch="$(echo "${num#v}" | cut -d. -f3)"
   (( patch <= 0 )) && return 0
   prevnum="v${major}.${minor}.$((patch - 1))"
-  # Versões cujo trecho numérico == prevnum (exclui RCs), maior por sort -V.
+  # Versions whose numeric part == prevnum (excluding RCs), highest by sort -V.
   jq -r ".${distro}.releases[].version" "$HEAD_JSON" \
     | grep -v -- '-rc' \
     | awk -v want="$prevnum" '
@@ -132,7 +132,7 @@ emit_marked_table() {
       echo "|------|:---:|"
       local f mark
       for f in "${flags[@]}"; do
-        if grep -qxF "$f" <<<"$set"; then mark="✅ sim"; else mark="❌ não"; fi
+        if grep -qxF "$f" <<<"$set"; then mark="✅ yes"; else mark="❌ no"; fi
         echo "| \`$f\` | $mark |"
       done
       echo ""
@@ -176,15 +176,14 @@ process_version() {
   local bin
   bin="$(download_binary "$distro" "$version")"
   if [[ -z "$bin" ]]; then
-    echo "> ⚠️ Binário indisponível para download (release ainda não publicada?). Pulando." >> "$OUT"
+    echo "> Could not download the binary for this version. Skipping." >> "$OUT"
     echo "" >> "$OUT"
     return
   fi
 
-  # Modelo assimétrico:
-  #  - server LÊ o agent também: server --help é comparado com serverArgs ∪ agentArgs
-  #    (flag de agent também vale no server).
-  #  - agent lê SÓ ele: agent --help é comparado apenas com agentArgs.
+  # server reads agent flags too: server --help is compared against
+  # serverArgs + agentArgs. agent reads only itself: agent --help is compared
+  # against agentArgs only.
   local bin_srv bin_agt ch_srv ch_agt ch_all
   bin_srv="$(extract_help_flags "$bin" server)"
   bin_agt="$(extract_help_flags "$bin" agent)"
@@ -192,38 +191,38 @@ process_version() {
   ch_agt="$(channel_args "$HEAD_JSON" "$distro" "$version" agentArgs)"
   ch_all="$(printf '%s\n%s\n' "$ch_srv" "$ch_agt" | sort -u | sed '/^$/d')"
 
-  # ---- Novidades: delta vs patch anterior da mesma minor ----
-  echo "### 🆕 Adicionadas pelo upstream nesta versão" >> "$OUT"
+  # Added upstream: delta vs the previous patch in the same minor.
+  echo "### Added upstream in this version" >> "$OUT"
   echo "" >> "$OUT"
   local prev prev_bin
   prev="$(previous_version "$distro" "$version")"
   if [[ -z "$prev" ]]; then
-    echo "> _Sem patch anterior na mesma minor para comparar._" >> "$OUT"
+    echo "> No previous patch in the same minor to compare against." >> "$OUT"
     echo "" >> "$OUT"
   else
     prev_bin="$(download_binary "$distro" "$prev")"
     if [[ -z "$prev_bin" ]]; then
-      echo "> ⚠️ Patch anterior \`$prev\` sem binário para comparar." >> "$OUT"
+      echo "> Previous patch \`$prev\` has no downloadable binary." >> "$OUT"
       echo "" >> "$OUT"
     else
-      echo "_Comparando com \`$prev\`._" >> "$OUT"
+      echo "Compared against \`$prev\`." >> "$OUT"
       echo "" >> "$OUT"
       comm -13 <(extract_help_flags "$prev_bin" server) <(echo "$bin_srv") \
-        | emit_marked_table "Novas flags de server" "$ch_all" "Já no channels?"
+        | emit_marked_table "New server flags" "$ch_all" "In channels?"
       comm -13 <(extract_help_flags "$prev_bin" agent) <(echo "$bin_agt") \
-        | emit_marked_table "Novas flags de agent" "$ch_agt" "Já no agentArgs?"
+        | emit_marked_table "New agent flags" "$ch_agt" "In agentArgs?"
     fi
   fi
 
-  # ---- Faltando no channels ----
-  echo "### ❌ Faltando no channels" >> "$OUT"
+  # Missing from channels.
+  echo "### Missing from channels" >> "$OUT"
   echo "" >> "$OUT"
-  # server: tudo do server --help ausente em serverArgs ∪ agentArgs
+  # server: everything in server --help not in serverArgs + agentArgs
   comm -23 <(echo "$bin_srv") <(echo "$ch_all") \
-    | emit_flag_table "Faltando no server (server --help vs serverArgs + agentArgs)"
-  # agent: tudo do agent --help ausente em agentArgs
+    | emit_flag_table "Missing from server (server --help vs serverArgs + agentArgs)"
+  # agent: everything in agent --help not in agentArgs
   comm -23 <(echo "$bin_agt") <(echo "$ch_agt") \
-    | emit_flag_table "Faltando no agent (agent --help vs agentArgs)"
+    | emit_flag_table "Missing from agent (agent --help vs agentArgs)"
 }
 
 # new_versions <distro> -> versions present in head but not in base
@@ -237,10 +236,10 @@ new_versions() {
 # ---- main ----
 : > "$OUT"
 {
-  echo "# Verificação de flags (channels × binário)"
+  echo "# Flag check (channels vs binary)"
   echo ""
-  echo "Para cada versão **nova** neste PR: flags que o upstream **adicionou**"
-  echo "(vs o patch anterior) e todas as flags do binário **faltando** no channels."
+  echo "For each new version in this PR: flags added upstream (compared to the"
+  echo "previous patch) and binary flags not declared in channels."
   echo ""
 } >> "$OUT"
 
@@ -254,7 +253,7 @@ for distro in k3s rke2; do
 done
 
 if [[ "$found_any" -eq 0 ]]; then
-  echo "_Nenhuma versão nova detectada — nada a verificar._" >> "$OUT"
+  echo "No new versions in this PR." >> "$OUT"
 fi
 
 exit 0
