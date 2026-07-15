@@ -8,6 +8,8 @@ on:
       - 'channels.yaml'
       - 'channels-rke2.yaml'
       - 'data/data.json'
+      - 'scripts/verify-flags.sh'
+      - '.github/workflows/verify-flags.yaml'
 
 permissions: {}
 
