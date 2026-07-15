@@ -1,0 +1,65 @@
+name: Verify flags drift
+
+on:
+  pull_request:
+    branches:
+      - 'dev-v*'
+    paths:
+      - 'channels.yaml'
+      - 'channels-rke2.yaml'
+      - 'data/data.json'
+
+permissions: {}
+
+jobs:
+  verify-flags:
+    name: Report flags missing in channels for new versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Dependencies (jq, curl)
+        run: |
+          echo "Installing jq and curl..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq curl
+
+      - name: Extract base data.json
+        run: |
+          git show "${{ github.event.pull_request.base.sha }}:data/data.json" > /tmp/base-data.json
+
+      - name: Run flag drift check
+        run: |
+          ./scripts/verify-flags.sh /tmp/base-data.json data/data.json /tmp/flags-report.md
+
+      - name: Write job summary
+        run: cat /tmp/flags-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upsert PR comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- flags-drift -->';
+            const body = marker + '\n' + fs.readFileSync('/tmp/flags-report.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number }
+            );
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
