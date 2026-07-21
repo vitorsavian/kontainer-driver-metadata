@@ -5,10 +5,11 @@ on:
     branches:
       - 'dev-v*'
       - 'release-v*'
-  pull_request:
-    branches:
-      - 'dev-v*'
-      - 'release-v*'
+  # TEMP: desativado para testar o workflow verify-flags isoladamente no PR. Reverter depois.
+  # pull_request:
+  #   branches:
+  #     - 'dev-v*'
+  #     - 'release-v*'
 
 permissions: {}
 
