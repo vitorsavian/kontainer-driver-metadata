@@ -77,13 +77,24 @@ jobs:
             --out /tmp/flags-report.md
 
       - name: Write job summary
+        id: report
         if: always()
         run: |
           if [[ -s /tmp/flags-report.md ]]; then
             cat /tmp/flags-report.md >> "$GITHUB_STEP_SUMMARY"
+            echo "has_report=true" >> "$GITHUB_OUTPUT"
           else
             echo "No new flags detected for the versions added in this PR." >> "$GITHUB_STEP_SUMMARY"
+            echo "has_report=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Upload report artifact
+        if: always() && steps.report.outputs.has_report == 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: flags-report
+          path: /tmp/flags-report.md
+          retention-days: 30
 
       - name: Upsert PR comment
         if: github.event_name == 'pull_request'

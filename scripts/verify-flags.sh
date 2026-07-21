@@ -4,21 +4,34 @@
 # flags declared in channels (serverArgs/agentArgs, read from the *resolved*
 # data/data.json after `go generate`).
 #
-# Two modes:
+# Three modes:
 #
-#   --mode pr    (default) For every version newly added in the PR (head vs a
-#                base data.json), report only the flags this version INTRODUCED
-#                compared to the previous patch in the same minor line, marking
-#                each with whether it is already declared in channels. If a
-#                version introduces no new flags, it is omitted; if no version
-#                introduces anything, the output file is left empty (the caller
-#                treats "empty" as "nothing to comment").
+#   --mode pr      (default) For every version newly added in the PR (head vs a
+#                  base data.json), report only the flags this version
+#                  INTRODUCED compared to the previous patch in the same minor
+#                  line, marking each with whether it is already declared in
+#                  channels. If a version introduces no new flags, it is
+#                  omitted; if no version introduces anything, the output file
+#                  is left empty (the caller treats "empty" as "nothing to
+#                  comment").
 #
-#   --mode audit Full audit of the version(s) given via --versions: every flag
-#                exposed by the binary that is NOT declared in channels, plus
-#                the inverse (declared in channels but not exposed by the
-#                binary). Meant for manual runs (workflow_dispatch), possibly
-#                without any PR.
+#   --mode audit   Full audit of the version(s) given via --versions: every
+#                  flag exposed by the binary that is NOT declared in channels,
+#                  plus the inverse (declared in channels but not exposed by the
+#                  binary). Meant for manual runs (workflow_dispatch), possibly
+#                  without any PR.
+#
+#   --mode general Whole-history sweep (meant to be run locally, NOT in CI: it
+#                  downloads one binary per minor line). Walks the latest patch
+#                  of every minor and, for each flag, records where it entered
+#                  in the binaries and where it is missing from channels. It
+#                  reports ONLY flags that were never declared — i.e. still
+#                  missing at their most recent point. A flag that was missing
+#                  early but later added to channels is intentionally omitted.
+#                  By default it scans the latest patch of each minor; pass
+#                  --all-patches to scan EVERY version (exact patch a flag
+#                  entered, at the cost of hundreds of downloads). Use
+#                  --minors N to limit to the N most recent minors.
 #
 # It reads serverArgs/agentArgs directly from data/data.json (anchors/merges
 # already expanded), downloads the matching release binaries, runs
@@ -26,9 +39,11 @@
 # informational and always exits 0.
 #
 # Usage:
-#   ./verify-flags.sh --mode pr    --base <base-data.json> [--head data/data.json] [--out file.md]
-#   ./verify-flags.sh --mode audit --versions "<v1> <v2> ..." [--distro both|k3s|rke2]
-#                                  [--head data/data.json] [--out file.md]
+#   ./verify-flags.sh --mode pr      --base <base-data.json> [--head data/data.json] [--out file.md]
+#   ./verify-flags.sh --mode audit   --versions "<v1> <v2> ..." [--distro both|k3s|rke2]
+#                                    [--head data/data.json] [--out file.md]
+#   ./verify-flags.sh --mode general [--distro both|k3s|rke2] [--minors N]
+#                                    [--all-patches] [--head data/data.json] [--out file.md]
 
 set -euo pipefail
 
@@ -47,9 +62,11 @@ HEAD_JSON="data/data.json"
 OUT="/dev/stdout"
 DISTRO_FILTER="both"
 VERSIONS_INPUT=""
+MINORS_LIMIT=0   # general mode: 0 = all minors, N = only the N most recent
+ALL_PATCHES=0    # general mode: 1 = scan every patch, 0 = latest patch per minor
 
 usage() {
-  sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,48p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +77,8 @@ while [[ $# -gt 0 ]]; do
     --out)      OUT="${2:-}"; shift 2 ;;
     --distro)   DISTRO_FILTER="${2:-}"; shift 2 ;;
     --versions) VERSIONS_INPUT="${2:-}"; shift 2 ;;
+    --minors)   MINORS_LIMIT="${2:-0}"; shift 2 ;;
+    --all-patches) ALL_PATCHES=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "Error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -87,15 +106,21 @@ case "$MODE" in
       exit 1
     fi
     ;;
+  general)
+    if ! [[ "$MINORS_LIMIT" =~ ^[0-9]+$ ]]; then
+      echo "Error: --minors must be a non-negative integer (got '$MINORS_LIMIT')" >&2
+      exit 1
+    fi
+    ;;
   *)
-    echo "Error: --mode must be 'pr' or 'audit' (got '$MODE')" >&2
+    echo "Error: --mode must be 'pr', 'audit' or 'general' (got '$MODE')" >&2
     exit 1
     ;;
 esac
 
-# Distros to consider. PR mode always scans both; audit honours --distro.
+# Distros to consider. PR mode always scans both; audit/general honour --distro.
 DISTROS=(k3s rke2)
-if [[ "$MODE" == "audit" && "$DISTRO_FILTER" != "both" ]]; then
+if [[ "$MODE" != "pr" && "$DISTRO_FILTER" != "both" ]]; then
   DISTROS=("$DISTRO_FILTER")
 fi
 
@@ -209,6 +234,7 @@ download_binary() {
       mkdir -p "$ex"
       if tar -xzf "$tgz" -C "$ex" bin/rke2 2>/dev/null; then
         chmod +x "$ex/bin/rke2"
+        rm -f "$tgz"   # keep only the extracted binary (matters for general mode)
         echo "$ex/bin/rke2"
       fi
     fi
@@ -398,6 +424,203 @@ new_versions() {
   )
 }
 
+# minors_for <distro> -> unique minor lines (vX.Y), ascending, RCs excluded.
+minors_for() {
+  local distro="$1"
+  (
+    set +o pipefail
+    jq -r ".${distro}.releases[].version" "$HEAD_JSON" \
+      | grep -v -- '-rc' \
+      | grep -oE 'v[0-9]+\.[0-9]+' \
+      | sort -V -u
+  )
+}
+
+# all_versions_for <distro> -> every stable version, ascending, RCs excluded.
+all_versions_for() {
+  local distro="$1"
+  (
+    set +o pipefail
+    jq -r ".${distro}.releases[].version" "$HEAD_JSON" \
+      | grep -v -- '-rc' \
+      | sort -V -u
+  )
+}
+
+# cleanup_binary <distro> <version>: drop a downloaded binary to bound disk use
+# (general mode scans each version exactly once, so nothing is reused).
+cleanup_binary() {
+  local distro="$1" version="$2"
+  local dest="$WORKDIR/${distro}-${version//[+\/]/_}"
+  if [[ "$distro" == "k3s" ]]; then
+    rm -f "$dest"
+  else
+    rm -rf "$WORKDIR/rke2-extract-${version//[+\/]/_}" "$dest.tar.gz"
+  fi
+}
+
+# compact_labels <space-separated-labels>: join with commas, but collapse long
+# lists to "first … last (N total)" so patch-level reports stay readable.
+compact_labels() {
+  local -a arr=($1)
+  local n=${#arr[@]}
+  if (( n == 0 )); then
+    echo "—"
+  elif (( n <= 8 )); then
+    local IFS=', '; echo "${arr[*]}"
+  else
+    echo "${arr[0]} … ${arr[n-1]} (${n} total)"
+  fi
+}
+
+# latest_patch <distro> <minor> -> highest stable version of that exact minor.
+latest_patch() {
+  local distro="$1" minor="$2"
+  (
+    set +o pipefail
+    jq -r ".${distro}.releases[].version" "$HEAD_JSON" \
+      | grep -v -- '-rc' \
+      | awk -v m="$minor" '
+          match($0, /v[0-9]+\.[0-9]+/) && substr($0, RSTART, RLENGTH) == m { print }
+        ' \
+      | sort -V | tail -1
+  )
+}
+
+# render_general_table <title> <entered-map> <chan-map> <missing-map> <latest-map>
+# Emits, for every flag still missing from channels at its latest minor, where
+# it entered and the minors where it is missing. Maps are passed by name.
+render_general_table() {
+  local title="$1"
+  local -n _ent="$2" _chan="$3" _miss="$4" _lat="$5"
+  local -a rows=()
+  local f
+  for f in "${!_ent[@]}"; do
+    # chan==0 means it is NOT declared at its most recent exposing minor, i.e.
+    # it was never added to channels. Flags added later are skipped.
+    [[ "${_chan[$f]:-0}" == "0" ]] && rows+=("$f")
+  done
+  local n=${#rows[@]}
+  {
+    echo "**${title}:** ${n}"
+    echo ""
+    if (( n > 0 )); then
+      echo "| Flag | Entered | Still missing at | Missing in |"
+      echo "|------|:-------:|:----------------:|------------|"
+      local sorted miss
+      sorted="$(printf '%s\n' "${rows[@]}" | sort)"
+      while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        miss="$(compact_labels "${_miss[$f]# }")"   # trim leading space + compact
+        echo "| \`$f\` | ${_ent[$f]} | ${_lat[$f]} | ${miss} |"
+      done <<<"$sorted"
+      echo ""
+    fi
+  } >> "$BODY"
+}
+
+# process_general_distro <distro>
+# Walks the latest patch of every minor (oldest -> newest), building the
+# per-flag "entered / missing" timeline, then reports the flags never declared.
+process_general_distro() {
+  local distro="$1"
+
+  # Build the list of points to scan. Each point has a version to download and
+  # a label to display (the full version in --all-patches mode, else the minor).
+  local -a scan_versions=() scan_labels=()
+  local minor ver
+  if (( ALL_PATCHES )); then
+    while IFS= read -r ver; do
+      [[ -z "$ver" ]] && continue
+      scan_versions+=("$ver"); scan_labels+=("$ver")
+    done < <(all_versions_for "$distro")
+  else
+    local -a minors
+    mapfile -t minors < <(minors_for "$distro")
+    if (( MINORS_LIMIT > 0 )) && (( ${#minors[@]} > MINORS_LIMIT )); then
+      minors=("${minors[@]: -MINORS_LIMIT}")
+    fi
+    for minor in "${minors[@]}"; do
+      [[ -z "$minor" ]] && continue
+      ver="$(latest_patch "$distro" "$minor")"
+      [[ -z "$ver" ]] && continue
+      scan_versions+=("$ver"); scan_labels+=("$minor")
+    done
+  fi
+
+  # flag -> first point exposing it (server / agent contexts kept separate).
+  local -A ent_srv=() lat_srv=() chan_srv=() miss_srv=()
+  local -A ent_agt=() lat_agt=() chan_agt=() miss_agt=()
+
+  local total=${#scan_versions[@]}
+  local processed=0 i version label bin bsrv bagt csrv cagt call f
+  for i in "${!scan_versions[@]}"; do
+    version="${scan_versions[$i]}"
+    label="${scan_labels[$i]}"
+    echo "[general] ${distro} $((i + 1))/${total}: ${label} (${version})" >&2
+
+    bin="$(download_binary "$distro" "$version")"
+    if [[ -z "$bin" ]]; then
+      echo "> ${distro} ${label}: could not download \`${version}\`; skipped." >> "$BODY"
+      echo "" >> "$BODY"
+      continue
+    fi
+    processed=$((processed + 1))
+
+    bsrv="$(extract_help_flags "$bin" server)"
+    bagt="$(extract_help_flags "$bin" agent)"
+    csrv="$(channel_args "$HEAD_JSON" "$distro" "$version" serverArgs)"
+    cagt="$(channel_args "$HEAD_JSON" "$distro" "$version" agentArgs)"
+    call="$(printf '%s\n%s\n' "$csrv" "$cagt" | sort -u | sed '/^$/d')"
+
+    # server context: server --help vs serverArgs + agentArgs
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      [[ -z "${ent_srv[$f]:-}" ]] && ent_srv[$f]="$label"
+      lat_srv[$f]="$label"
+      if grep -qxF "$f" <<<"$call"; then
+        chan_srv[$f]=1
+      else
+        chan_srv[$f]=0
+        miss_srv[$f]="${miss_srv[$f]:-} $label"
+      fi
+    done <<<"$bsrv"
+
+    # agent context: agent --help vs agentArgs
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      [[ -z "${ent_agt[$f]:-}" ]] && ent_agt[$f]="$label"
+      lat_agt[$f]="$label"
+      if grep -qxF "$f" <<<"$cagt"; then
+        chan_agt[$f]=1
+      else
+        chan_agt[$f]=0
+        miss_agt[$f]="${miss_agt[$f]:-} $label"
+      fi
+    done <<<"$bagt"
+
+    cleanup_binary "$distro" "$version"
+  done
+
+  {
+    echo "## ${distro}"
+    echo ""
+    if (( ALL_PATCHES )); then
+      echo "_Scanned:_ ${processed}/${total} patches (all versions)."
+    else
+      echo "_Scanned:_ ${processed}/${total} minors (latest patch each)."
+    fi
+    echo ""
+  } >> "$BODY"
+
+  render_general_table "Server flags never declared (server --help vs serverArgs + agentArgs)" \
+    ent_srv chan_srv miss_srv lat_srv
+  render_general_table "Agent flags never declared (agent --help vs agentArgs)" \
+    ent_agt chan_agt miss_agt lat_agt
+
+  SECTIONS=$((SECTIONS + 1))
+}
+
 # ---- main ----
 if [[ "$MODE" == "pr" ]]; then
   for distro in "${DISTROS[@]}"; do
@@ -418,6 +641,33 @@ if [[ "$MODE" == "pr" ]]; then
     echo ""
     echo "For each version added in this PR, the flags it introduced compared to"
     echo "the previous patch. ⚠️ marks flags not yet declared in channels."
+    echo ""
+    cat "$BODY"
+  } > "$OUT"
+  exit 0
+fi
+
+if [[ "$MODE" == "general" ]]; then
+  for distro in "${DISTROS[@]}"; do
+    process_general_distro "$distro"
+  done
+
+  {
+    echo "# Flag introduction & channel gaps (general audit)"
+    echo ""
+    if (( ALL_PATCHES )); then
+      echo "Every version (all patches). For each flag the binary exposes but"
+      echo "that was **never** declared in channels (still missing at its most"
+      echo "recent version), this lists the exact patch where it entered and the"
+      echo "versions where it is missing — i.e. where you can add it."
+    else
+      echo "Latest patch of each minor line. For each flag the binary exposes but"
+      echo "that was **never** declared in channels (still missing at its most"
+      echo "recent minor), this lists where it entered and the minors where it is"
+      echo "missing — i.e. where you can add it."
+    fi
+    echo "Flags that were added to channels at some later point are"
+    echo "intentionally omitted."
     echo ""
     cat "$BODY"
   } > "$OUT"
