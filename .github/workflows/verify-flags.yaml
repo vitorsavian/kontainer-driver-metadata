@@ -10,47 +10,93 @@ on:
       - 'data/data.json'
       - 'scripts/verify-flags.sh'
       - '.github/workflows/verify-flags.yaml'
+  workflow_dispatch:
+    inputs:
+      distro:
+        description: 'Distro to audit'
+        type: choice
+        options:
+          - both
+          - k3s
+          - rke2
+        default: both
+      versions:
+        description: 'Versions to audit, space or comma separated (e.g. "v1.31.5+k3s1 v1.30.9+rke2r1")'
+        required: true
+        type: string
 
 permissions: {}
 
+# Cancel superseded runs for the same PR / manual invocation.
+concurrency:
+  group: verify-flags-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify-flags:
-    name: Report flags missing in channels for new versions
+    name: Report flag drift between channels and release binaries
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
-
-      - name: Set up Dependencies (jq, curl)
+      - name: Regenerate data.json
         run: |
-          echo "Installing jq and curl..."
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq jq curl
+          go version
+          go generate ./...
 
       - name: Extract base data.json
+        if: github.event_name == 'pull_request'
         run: |
           git show "${{ github.event.pull_request.base.sha }}:data/data.json" > /tmp/base-data.json
 
-      - name: Run flag drift check
+      - name: Run flag check (PR)
+        if: github.event_name == 'pull_request'
         run: |
-          ./scripts/verify-flags.sh /tmp/base-data.json data/data.json /tmp/flags-report.md
+          ./scripts/verify-flags.sh \
+            --mode pr \
+            --base /tmp/base-data.json \
+            --head data/data.json \
+            --out /tmp/flags-report.md
+
+      - name: Run flag audit (manual)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          ./scripts/verify-flags.sh \
+            --mode audit \
+            --head data/data.json \
+            --distro "${{ inputs.distro }}" \
+            --versions "${{ inputs.versions }}" \
+            --out /tmp/flags-report.md
 
       - name: Write job summary
-        run: cat /tmp/flags-report.md >> "$GITHUB_STEP_SUMMARY"
+        if: always()
+        run: |
+          if [[ -s /tmp/flags-report.md ]]; then
+            cat /tmp/flags-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No new flags detected for the versions added in this PR." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upsert PR comment
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- flags-drift -->';
-            const body = marker + '\n' + fs.readFileSync('/tmp/flags-report.md', 'utf8');
+
+            let report = '';
+            try { report = fs.readFileSync('/tmp/flags-report.md', 'utf8'); } catch (e) {}
+            const hasFindings = report.trim().length > 0;
+
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
 
@@ -60,8 +106,16 @@ jobs:
             );
             const existing = comments.find(c => c.body && c.body.includes(marker));
 
-            if (existing) {
+            if (hasFindings) {
+              const body = marker + '\n' + report;
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              }
+            } else if (existing) {
+              // A previous push flagged something that is now resolved.
+              const body = marker + '\n✅ No new upstream flags missing from channels for the versions added in this PR.';
               await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
+            // No findings and no prior comment: stay silent.
